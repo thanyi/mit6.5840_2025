@@ -19,6 +19,20 @@ import (
 	"6.5840/tester1"
 )
 
+const (
+	TM_HeartBeatInterval time.Duration = 100 * time.Millisecond
+	TM_ElectionTimeInterval   time.Duration = 300 * time.Millisecond
+	TM_RandomWaitInterval    time.Duration = 500 * time.Millisecond
+	MAX_RETRY_TIMES      int           = 3
+)
+
+type State int
+
+const (
+	RaftFollower State = iota
+	RaftCandidate
+	RaftLeader
+)
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -31,7 +45,26 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	state         	  State 		//   节点状态，分为Follower、Leader、Candidate
+	lastelectionTime  time.Time
+	lastHeartbeatTime time.Time
 
+	// 以下字段论文原文
+	currentTerm int        // 当前任期
+	votedFor    int        // 投票给的候选者ID
+	log         []LogEntry // 日志
+	commitIndex int        // 已经提交的最高日志条目索引
+	lastApplied int        // 已经应用到状态机的最高日志条目索引
+	nextIndex   []int      // 对每个服务器，要发送的下一跳日志条目的索引
+	matchIndex  []int      // 对每个服务器，已知被复制的最高日志条目的索引
+}
+
+func (rf *Raft) ResetHeartbeat() () {
+	rf.lastHeartbeatTime = time.Now()
+}
+
+func (rf *Raft) ResetelectionTime() () {
+	rf.lastHeartbeatTime = time.Now()
 }
 
 // return currentTerm and whether this server
@@ -40,7 +73,9 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
-	// Your code here (3A).
+	// Your code here (3A). Done
+	term = rf.currentTerm
+	isleader = rf.state == RaftLeader
 	return term, isleader
 }
 
@@ -61,7 +96,6 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -90,7 +124,6 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -100,11 +133,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+
 }
 
 // example RequestVote RPC reply structure.
@@ -150,7 +183,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -169,7 +201,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
 
 	return index, term, isLeader
 }
@@ -198,11 +229,10 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
-
+		if rf.state != RaftLeader && rf.
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := rf. + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -230,7 +260,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
