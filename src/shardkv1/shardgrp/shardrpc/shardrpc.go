@@ -5,26 +5,12 @@ import (
 	"6.5840/shardkv1/shardcfg"
 )
 
-// Same as Put in kvsrv1/rpc, but with a configuration number
-type PutArgs struct {
-	Key     string
-	Value   string
-	Version rpc.Tversion
-	Num     shardcfg.Tnum
-}
-
-// Same as Get in kvsrv1/rpc, but with a configuration number.
-type GetArgs struct {
-	Key string
-	Num shardcfg.Tnum
-}
-
-type FreezeArgs struct {
+type FreezeShardArgs struct {
 	Shard shardcfg.Tshid
 	Num   shardcfg.Tnum
 }
 
-type FreezeReply struct {
+type FreezeShardReply struct {
 	State []byte
 	Num   shardcfg.Tnum
 	Err   rpc.Err
