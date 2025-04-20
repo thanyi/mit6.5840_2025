@@ -46,8 +46,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	state         	  State 		//   节点状态，分为Follower、Leader、Candidate
-	lastelectionTime  time.Time
-	lastHeartbeatTime time.Time
+	electionTime  time.Time
+	heartbeatTime time.Time
 
 	// 以下字段论文原文
 	currentTerm int        // 当前任期
@@ -60,11 +60,14 @@ type Raft struct {
 }
 
 func (rf *Raft) ResetHeartbeat() () {
-	rf.lastHeartbeatTime = time.Now()
+	now := time.Now()
+	rf.heartbeatTime = now.Add(TM_HeartBeatInterval) 				// 心跳时间更新100毫秒
 }
 
 func (rf *Raft) ResetelectionTime() () {
-	rf.lastHeartbeatTime = time.Now()
+	now := time.Now()
+	extra := time.Duration(float64(rand.Int63() % int64(TM_ElectionTimeInterval)) * 0.7)
+	rf.electionTime = now.Add(TM_ElectionTimeInterval).Add(extra)     // 选举时间更新为300毫秒 * (1 + rand(0.7))
 }
 
 // return currentTerm and whether this server
@@ -137,18 +140,26 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-
+	Term         int // 候选者的任期号
+	CandidateId  int // 候选者ID
+	LastLogIndex int // 候选者最新日志的索引
+	LastLogTerm  int // 候选者最新日志的任期号
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int  // 当前任期
+	VoteGranted bool // 是否投票
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+
+
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -232,7 +243,7 @@ func (rf *Raft) ticker() {
 		if rf.state != RaftLeader && rf.
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := rf. + (rand.Int63() % 300)
+		ms := rand.Int63() % int64(TM_ElectionTimeInterval)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
