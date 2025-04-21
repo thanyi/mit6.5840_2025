@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	TM_HeartBeatInterval time.Duration = 100 * time.Millisecond
-	TM_ElectionTimeInterval   time.Duration = 300 * time.Millisecond
-	TM_RandomWaitInterval    time.Duration = 500 * time.Millisecond
-	MAX_RETRY_TIMES      int           = 3
+	TMIN_HeartBeatInterval    time.Duration = 100 * time.Millisecond
+	TMIN_ElectionTimeInterval time.Duration = 300 * time.Millisecond
+	TM_RandomWaitInterval     time.Duration = 500 * time.Millisecond
+	MAX_RETRY_TIMES           int           = 3
 )
 
 type State int
@@ -45,9 +45,9 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state         	  State 		//   节点状态，分为Follower、Leader、Candidate
-	electionTime  time.Time
-	heartbeatTime time.Time
+	state             State //   节点状态，分为Follower、Leader、Candidate
+	nextElectionTime  time.Time
+	nextHeartbeatTime time.Time
 
 	// 以下字段论文原文
 	currentTerm int        // 当前任期
@@ -59,15 +59,17 @@ type Raft struct {
 	matchIndex  []int      // 对每个服务器，已知被复制的最高日志条目的索引
 }
 
-func (rf *Raft) ResetHeartbeat() () {
+// 帮助更新下一次心跳时间点
+func (rf *Raft) ResetHeartbeat() {
 	now := time.Now()
-	rf.heartbeatTime = now.Add(TM_HeartBeatInterval) 				// 心跳时间更新100毫秒
+	rf.nextHeartbeatTime = now.Add(TMIN_HeartBeatInterval) // 心跳时间更新100毫秒
 }
 
-func (rf *Raft) ResetelectionTime() () {
+// 帮助更新下一次选举时间点
+func (rf *Raft) ResetelectionTime() {
 	now := time.Now()
-	extra := time.Duration(float64(rand.Int63() % int64(TM_ElectionTimeInterval)) * 0.7)
-	rf.electionTime = now.Add(TM_ElectionTimeInterval).Add(extra)     // 选举时间更新为300毫秒 * (1 + rand(0.7))
+	extra := time.Duration(float64(rand.Int63()%int64(TMIN_ElectionTimeInterval)) * 0.7)
+	rf.nextElectionTime = now.Add(TMIN_ElectionTimeInterval).Add(extra) // 选举时间更新为300毫秒 * (1 + rand(0.7))
 }
 
 // return currentTerm and whether this server
@@ -155,11 +157,99 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
+// RequestVote由Leader发出，由Follower接收并进行投票
+// 所以这里的逻辑是以Follower为视角
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	DebugPrintf(dVote, rf.me, "Follower%d收到Candidate%d的请求", rf.me, args.CandidateId)
+	// 拒绝情况讨论
+	// 1.Follower任期与Candidate任期比较
+	if rf.currentTerm > args.Term {
+		DebugPrintf(dVote, rf.me, "拒绝请求，Candidate%d任期小于Follower任期", args.CandidateId)
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	// 2.不为-1，表示已经投过票；
+	// 不为args.CandidateId，表示不是由于网络原因为同一个候选人投票
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		DebugPrintf(dVote, rf.me, "拒绝请求，Follower%d已为其他候选人投票", rf.me)
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
 
+	// 假如候选者任期大于跟随者，跟随者任期更新
+	if rf.currentTerm < args.Term {
+		DebugPrintf(dVote, rf.me, "Follower%d任期有误，更新当前任期为：%d", rf.me, args.Term)
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+	// --------- 开始投票 -----------
+	DebugPrintf(dVote, rf.me, "Follower%d更新当前任期为%d", rf.me, args.Term)
+	reply.VoteGranted = true
+	reply.Term = rf.currentTerm
+	rf.votedFor = args.CandidateId
+	rf.ResetelectionTime()
 
+}
+
+// 日志信息和心跳信息的请求体
+// 只有Leader可以发送
+type AppendEntriesArgs struct {
+	Term         int   // 候选者的任期号
+	LeaderId     int   // 首领的ID
+	PrevLogIndex int   //
+	PrevLogTerm  int   //
+	Entries      []int // log日志构成的数组
+	LeaderCommit int   // Leader的commitID
+}
+
+// 日志信息和心跳信息的请求体
+// 由Follower们发送
+type AppendEntriesReply struct {
+	Term    int  // 当前任期
+	Success bool // 如果Follower们存有对应的prevLogIndex和prevLogTerm
+}
+
+// 在Lab3A中，只针对心跳信息进行发送
+// 逻辑也是在Follower端执行
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 领导者任期小于当前任期
+	if args.Term < rf.currentTerm {
+		DebugPrintf(dVote, rf.me, "Leader%d任期小于Follower%d，拒绝AppendEntries", args.LeaderId, rf.me)
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	// 领导者任期大于当前任期
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		if rf.state != RaftFollower {
+			DebugPrintf(dClient, rf.me, "收到的新的任期号Term%d，降级为Follower", rf.currentTerm)
+			rf.state = RaftFollower
+		}
+	}
+
+	if rf.state == RaftCandidate {
+		DebugPrintf(dClient, rf.me, "候选者%d，降级为Follower", rf.me, rf.currentTerm)
+		rf.state = RaftFollower
+	}
+
+	reply.Success = true
+	reply.Term = rf.currentTerm
+	rf.ResetelectionTime()
+
+}
+
+func (rf *Raft) StartElection() {
+	// TODO 开始进行选举，注意每一个选举需要进行协程操作
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -240,10 +330,14 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-		if rf.state != RaftLeader && rf.
+		rf.mu.Lock() // 加锁保护
+		if rf.state != RaftLeader && time.Now().After(rf.nextElectionTime) {
+			// Todo 进行选举
+		}
+		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := rand.Int63() % int64(TM_ElectionTimeInterval)
+		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -265,6 +359,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+
+	// 更新状态，心跳和选举时间
+	rf.ResetHeartbeat()
+	rf.ResetelectionTime()
+	// 更新其他状态
+	rf.state = RaftFollower
+	rf.votedFor = -1
+	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
