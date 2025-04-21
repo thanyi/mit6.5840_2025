@@ -250,6 +250,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) StartElection() {
 	// TODO 开始进行选举，注意每一个选举需要进行协程操作
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -281,6 +284,11 @@ func (rf *Raft) StartElection() {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
