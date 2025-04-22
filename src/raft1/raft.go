@@ -19,6 +19,11 @@ import (
 	"6.5840/tester1"
 )
 
+type LogEntry struct {
+	Term    int         //创建该Log时的任期
+	Command interface{} //需要执行的命令
+}
+
 const (
 	TMIN_HeartBeatInterval    time.Duration = 100 * time.Millisecond
 	TMIN_ElectionTimeInterval time.Duration = 300 * time.Millisecond
@@ -66,7 +71,7 @@ func (rf *Raft) ResetHeartbeat() {
 }
 
 // 帮助更新下一次选举时间点
-func (rf *Raft) ResetelectionTime() {
+func (rf *Raft) ResetElectionTime() {
 	now := time.Now()
 	extra := time.Duration(float64(rand.Int63()%int64(TMIN_ElectionTimeInterval)) * 0.7)
 	rf.nextElectionTime = now.Add(TMIN_ElectionTimeInterval).Add(extra) // 选举时间更新为300毫秒 * (1 + rand(0.7))
@@ -193,7 +198,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 	rf.votedFor = args.CandidateId
-	rf.ResetelectionTime()
+	rf.ResetElectionTime()
 
 }
 
@@ -244,7 +249,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	rf.ResetelectionTime()
+	rf.ResetElectionTime()
 
 }
 
@@ -252,7 +257,128 @@ func (rf *Raft) StartElection() {
 	// TODO 开始进行选举，注意每一个选举需要进行协程操作
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.currentTerm += 1
+	rf.state = RaftCandidate
+	rf.votedFor = rf.me
 
+	go rf.broadcastElection()
+
+	rf.ResetElectionTime()
+}
+
+// 从Candidate端进行广播请求，请求投票
+func (rf *Raft) broadcastElection() {
+
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	voteCnt := 1
+	var once sync.Once
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		// 每针对一个i，生成一个go协程进行投票
+		go func(i int, args RequestVoteArgs) {
+			reply := RequestVoteReply{}
+
+			if !rf.sendRequestVote(i, &args, &reply) {
+				// 投票过程失败，不做处理
+				return
+			}
+
+			if !reply.VoteGranted {
+				// 如果VoteGranted为false，表示已经投票，不做处理
+				return
+			}
+
+			if reply.Term > rf.currentTerm {
+				// 如果返回的Term大于自身，状态变为Follower
+				rf.state = RaftFollower
+				rf.votedFor = -1
+				rf.currentTerm = reply.Term
+
+				rf.ResetElectionTime()
+
+				return
+			}
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			// 成功的情况，需要加锁，保证对voteCnt操作不会冲突
+
+			voteCnt += 1
+			if voteCnt > len(rf.peers)/2 {
+				once.Do(func() {
+					rf.state = RaftLeader
+					DebugPrintf(dLeader, rf.me, "server%d升级为Leader", rf.me)
+					DebugPrintf(dTerm, rf.me, "当前任期号：%d", rf.currentTerm)
+					// TODO 开始广播发送AppendEntries
+					rf.broadcastHeartbeat()
+					rf.ResetHeartbeat()
+				})
+			}
+		}(i, args)
+
+		// 如果状态变为Follower，表示投票失败，直接退出循环
+		if rf.state == RaftFollower {
+			DebugPrintf(dError, rf.me, "server%d降级为Follower，投票结束", rf.me)
+			break
+		}
+	}
+}
+
+// 进行广播心跳信息，对每一个server发送AppendEntries
+func (rf *Raft) broadcastHeartbeat() {
+	DebugPrintf(dLeader, rf.me, "Leader%d开始发送心跳信息", rf.me)
+	args := AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+	}
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+
+		go func(i int, args AppendEntriesArgs) {
+			reply := AppendEntriesReply{}
+
+			if !rf.sendAppendEntries(i, &args, &reply) {
+				// 信息发送失败
+				return
+			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.Term > rf.currentTerm {
+				// 接收的任期小于自身任期，降级为Follower
+				DebugPrintf(dError, rf.me, "server%d降级为Follower", rf.me)
+				rf.state = RaftFollower
+				rf.votedFor = -1
+				rf.currentTerm = reply.Term
+				rf.ResetElectionTime()
+				return
+			}
+
+			if reply.Success {
+				DebugPrintf(dLeader, rf.me, "S%d成功AppendEntry", rf.peers[i])
+			} else {
+				DebugPrintf(dLeader, rf.me, "S%d未成功AppendEntry", rf.peers[i])
+			}
+
+		}(i, args)
+
+		if rf.state != RaftLeader {
+			break
+		}
+	}
+	// 更新心跳时间，如果被降为Follower，则更新选举时间
+	rf.ResetHeartbeat()
+	if rf.state != RaftLeader {
+		rf.ResetElectionTime()
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -326,6 +452,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	DebugPrintf(dWarn, rf.me, "Killed")
 }
 
 func (rf *Raft) killed() bool {
@@ -340,8 +467,17 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		rf.mu.Lock() // 加锁保护
 		if rf.state != RaftLeader && time.Now().After(rf.nextElectionTime) {
-			// Todo 进行选举
+			//  进行选举
+			rf.StartElection()
 		}
+		rf.mu.Unlock()
+
+		rf.mu.Lock()
+		if rf.state == RaftLeader && time.Now().After(rf.nextHeartbeatTime) {
+			// 发送心跳信息
+			rf.broadcastHeartbeat()
+		}
+
 		rf.mu.Unlock()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -370,7 +506,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 更新状态，心跳和选举时间
 	rf.ResetHeartbeat()
-	rf.ResetelectionTime()
+	rf.ResetElectionTime()
+
 	// 更新其他状态
 	rf.state = RaftFollower
 	rf.votedFor = -1
