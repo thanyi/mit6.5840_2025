@@ -169,19 +169,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DebugPrintf(dVote, rf.me, "Follower%d收到Candidate%d的请求", rf.me, args.CandidateId)
+	DebugPrintf(dVote, rf.me, "Follower%d receives requests of Candidate%d.", rf.me, args.CandidateId)
 	// 拒绝情况讨论
 	// 1.Follower任期与Candidate任期比较
 	if rf.currentTerm > args.Term {
-		DebugPrintf(dVote, rf.me, "拒绝请求，Candidate%d任期小于Follower任期", args.CandidateId)
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		return
-	}
-	// 2.不为-1，表示已经投过票；
-	// 不为args.CandidateId，表示不是由于网络原因为同一个候选人投票
-	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		DebugPrintf(dVote, rf.me, "拒绝请求，Follower%d已为其他候选人投票", rf.me)
+		DebugPrintf(dVote, rf.me, "reject Vote, Term of Candidate%d smaller than that of Follower.", args.CandidateId)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -189,12 +181,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 假如候选者任期大于跟随者，跟随者任期更新
 	if rf.currentTerm < args.Term {
-		DebugPrintf(dVote, rf.me, "Follower%d任期有误，更新当前任期为：%d", rf.me, args.Term)
+		// 如果此时状态不是Follower，则需降为Follower
+		if rf.state != RaftFollower {
+			rf.state = RaftFollower
+		}
+		DebugPrintf(dVote, rf.me, "Follower%d update term to：%d", rf.me, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
+
+	// 2.在相同任期的时候，若是votefor不为-1，表示已经投过票；
+	// 不为args.CandidateId，表示不是由于网络原因为同一个候选人投票
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		DebugPrintf(dVote, rf.me, "reject Vote，Follower%d have voted.", rf.me)
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
 	// --------- 开始投票 -----------
-	DebugPrintf(dVote, rf.me, "Follower%d更新当前任期为%d", rf.me, args.Term)
+	//DebugPrintf(dVote, rf.me, "Follower%d更新当前任期为%d", rf.me, args.Term)
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 	rf.votedFor = args.CandidateId
@@ -228,7 +234,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 领导者任期小于当前任期
 	if args.Term < rf.currentTerm {
-		DebugPrintf(dVote, rf.me, "Leader%d任期小于Follower%d，拒绝AppendEntries", args.LeaderId, rf.me)
+		DebugPrintf(dVote, rf.me, "Term of Leader%d smaller than Follower%d，reject AppendEntries.", args.LeaderId, rf.me)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -237,13 +243,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		if rf.state != RaftFollower {
-			DebugPrintf(dClient, rf.me, "收到的新的任期号Term%d，降级为Follower", rf.currentTerm)
+			DebugPrintf(dClient, rf.me, "Receive higher Term%d, down to Follower", rf.currentTerm)
 			rf.state = RaftFollower
 		}
 	}
-
+	// 等于当前任期，Candidate遇到心跳信息，降为follower
 	if rf.state == RaftCandidate {
-		DebugPrintf(dClient, rf.me, "候选者%d，降级为Follower", rf.me, rf.currentTerm)
+		DebugPrintf(dClient, rf.me, "Candidate%d receive AppendEntries, down to Follower", rf.me)
 		rf.state = RaftFollower
 	}
 
@@ -254,13 +260,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) StartElection() {
-	// TODO 开始进行选举，注意每一个选举需要进行协程操作
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// 开始进行选举，注意每一个选举需要进行协程操作
 	rf.currentTerm += 1
 	rf.state = RaftCandidate
 	rf.votedFor = rf.me
-
+	DebugPrintf(dVote, rf.me, "Candidate%d start election, term：%d", rf.me, rf.currentTerm)
 	go rf.broadcastElection()
 
 	rf.ResetElectionTime()
@@ -313,9 +317,9 @@ func (rf *Raft) broadcastElection() {
 			if voteCnt > len(rf.peers)/2 {
 				once.Do(func() {
 					rf.state = RaftLeader
-					DebugPrintf(dLeader, rf.me, "server%d升级为Leader", rf.me)
-					DebugPrintf(dTerm, rf.me, "当前任期号：%d", rf.currentTerm)
-					// TODO 开始广播发送AppendEntries
+					DebugPrintf(dLeader, rf.me, "server%d up to Leader", rf.me)
+					DebugPrintf(dTerm, rf.me, "the Term：%d", rf.currentTerm)
+					// 开始广播发送AppendEntries
 					rf.broadcastHeartbeat()
 					rf.ResetHeartbeat()
 				})
@@ -324,7 +328,7 @@ func (rf *Raft) broadcastElection() {
 
 		// 如果状态变为Follower，表示投票失败，直接退出循环
 		if rf.state == RaftFollower {
-			DebugPrintf(dError, rf.me, "server%d降级为Follower，投票结束", rf.me)
+			DebugPrintf(dError, rf.me, "server%d down to Follower，end election.", rf.me)
 			break
 		}
 	}
@@ -332,7 +336,7 @@ func (rf *Raft) broadcastElection() {
 
 // 进行广播心跳信息，对每一个server发送AppendEntries
 func (rf *Raft) broadcastHeartbeat() {
-	DebugPrintf(dLeader, rf.me, "Leader%d开始发送心跳信息", rf.me)
+	DebugPrintf(dLeader, rf.me, "Leader%d start to send AppendEntries, term: %d", rf.me, rf.currentTerm)
 	args := AppendEntriesArgs{
 		Term:     rf.currentTerm,
 		LeaderId: rf.me,
@@ -353,8 +357,8 @@ func (rf *Raft) broadcastHeartbeat() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if reply.Term > rf.currentTerm {
-				// 接收的任期小于自身任期，降级为Follower
-				DebugPrintf(dError, rf.me, "server%d降级为Follower", rf.me)
+				// 接收的任期大于自身任期，降级为Follower
+				DebugPrintf(dError, rf.me, "server%d receives higher term in AppendEntries reply, down to Follower", rf.me)
 				rf.state = RaftFollower
 				rf.votedFor = -1
 				rf.currentTerm = reply.Term
@@ -363,9 +367,9 @@ func (rf *Raft) broadcastHeartbeat() {
 			}
 
 			if reply.Success {
-				DebugPrintf(dLeader, rf.me, "S%d成功AppendEntry", rf.peers[i])
+				DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
 			} else {
-				DebugPrintf(dLeader, rf.me, "S%d未成功AppendEntry", rf.peers[i])
+				DebugPrintf(dLeader, rf.me, "S%d AppendEntry failed.", i)
 			}
 
 		}(i, args)
@@ -468,6 +472,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock() // 加锁保护
 		if rf.state != RaftLeader && time.Now().After(rf.nextElectionTime) {
 			//  进行选举
+
 			rf.StartElection()
 		}
 		rf.mu.Unlock()
