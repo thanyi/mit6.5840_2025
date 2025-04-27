@@ -441,6 +441,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 	// 对server来说，检查其是否是leader，完成广播日志信息
+	// start函数是一个来自应用层的接口
+	// TODO: 实现start函数进行存储日志信息，并在commit之后用另一个系统调用返回
+	term = rf.currentTerm
+	if rf.state != RaftLeader {
+		isLeader = false
+	}
 
 	return index, term, isLeader
 }
