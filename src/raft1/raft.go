@@ -440,6 +440,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	// 对server来说，检查其是否是leader，完成广播日志信息
 
 	return index, term, isLeader
 }
