@@ -307,24 +307,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
-	//
-	//for i, entry := range args.Entries {
-	//	// 第一个判断条件防止并发过程中有旧的数据被重新收到
-	//	// 第二个判断条件是截断未提交的过期数据
-	//	if rf.getLastLogIndex() < args.PrevLogIndex+i+1 || rf.getLogFromIndex(args.PrevLogIndex+i+1).Term != entry.Term {
-	//		rf.log = append(rf.getLogSlice(1, args.PrevLogIndex+i+1), args.Entries[i:]...)
-	//		break
-	//	}
-	//}
-
-	//// 如果前日志不相等，直接拒绝
-	//if rf.log[prevLogIndex].Term != prevLogTerm {
-	//	DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
-	//		rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm)
-	//	reply.Success = false
-	//	reply.Term = rf.currentTerm
-	//	return
-	//}
 
 	// 如果prev匹配成功
 	// 如果当前应更新
@@ -334,7 +316,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 更新log
 	rf.log = append(rf.log, args.Entries...)
-	DebugPrintf(dLog, rf.me, "Follower%d update the log : %v.", rf.me, rf.log)
+	DebugPrintf(dLog, rf.me, "Follower%d update the log : %d.", rf.me, len(rf.log))
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
@@ -353,17 +335,6 @@ func (rf *Raft) StartElection() {
 
 	rf.ResetElectionTime()
 }
-
-//func (rf *Raft) changeToLeader() {
-//
-//	rf.state = RaftLeader
-//	DebugPrintf(dLeader, rf.me, "server%d up to Leader", rf.me)
-//	DebugPrintf(dTerm, rf.me, "the Term：%d", rf.currentTerm)
-//
-//	// 开始广播发送AppendEntries
-//	rf.broadcastHeartbeat()
-//	rf.ResetHeartbeat()
-//}
 
 // 从Candidate端进行广播请求，请求投票
 func (rf *Raft) broadcastElection() {
@@ -445,7 +416,7 @@ func (rf *Raft) broadcastElection() {
 
 // 进行广播心跳信息，对每一个server发送AppendEntries
 func (rf *Raft) broadcastHeartbeat() {
-	DebugPrintf(dTrace, rf.me, "Leader%d start to send AppendEntries, log: %v", rf.me, rf.log)
+	DebugPrintf(dTrace, rf.me, "Leader%d start to send AppendEntries, log length: %d", rf.me, len(rf.log))
 
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -465,8 +436,8 @@ func (rf *Raft) broadcastHeartbeat() {
 		)
 		if rf.getLastLogIndex() >= rf.nextIndex[i] {
 			entries = rf.getLogSlice(rf.nextIndex[i], rf.getLastLogIndex()+1)
-			DebugPrintf(dInfo, rf.me,
-				"For S%d, Append Entiries: %v, nextIdx:%d", i, entries, rf.nextIndex[i])
+			//DebugPrintf(dInfo, rf.me,
+			//	"For S%d, Append Entiries: %v, nextIdx:%d", i, entries, rf.nextIndex[i])
 		}
 
 		if rf.getPrevLogIndex(i) >= 0 {
@@ -505,7 +476,7 @@ func (rf *Raft) broadcastHeartbeat() {
 func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 
-	DebugPrintf(dLeader, rf.me, "Send appendEntries to Follower %d, Use PrevLogIndex %d, PrevLogTerm %d, entries: %v.", i, args.PrevLogIndex, args.PrevLogTerm, args.Entries)
+	DebugPrintf(dLeader, rf.me, "Send appendEntries to Follower %d, Use PrevLogIndex %d, PrevLogTerm %d, entries length: %d.", i, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
 	//DebugPrintf(dInfo, rf.me,
 	//	"For S%d, getPrevLogIndex: %d, nextIdx:%d", i, args.PrevLogIndex, rf.nextIndex[i])
 	if !rf.sendAppendEntries(i, &args, &reply) {
@@ -534,15 +505,15 @@ func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 			DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
 			//DebugPrintf(dLeader, rf.me, "Leader log: %v", rf.log)
 			// 更新对应的nextIndex和matchIndex
-			//rf.nextIndex[i] = rf.getLastLogIndex() + 1
-			//rf.matchIndex[i] = rf.getLastLogIndex()
+			rf.nextIndex[i] = rf.getLastLogIndex() + 1
+			rf.matchIndex[i] = rf.getLastLogIndex()
 
 			//更新peer的nextIdx和matchIdx
-			newNext := args.PrevLogIndex + len(args.Entries) + 1
-			newMatch := args.PrevLogIndex + len(args.Entries)
-			//计算当前commitIdx，保证幂等性
-			rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
-			rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
+			//newNext := args.PrevLogIndex + len(args.Entries) + 1
+			//newMatch := args.PrevLogIndex + len(args.Entries)
+			////计算当前commitIdx，保证幂等性
+			//rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
+			//rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
 
 			rf.updateCommitIndex()
 			//DebugPrintf(dLog2, rf.me, "After recieve reply, matchIndex=%d, nextIndex=%d", rf.matchIndex, rf.nextIndex)
