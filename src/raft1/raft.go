@@ -299,13 +299,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//
-	//// 如果日志在PrevLogIndex中不包含Term与PrevLogTerm匹配的Entry，则回复false
-	//if rf.getLastLogIndex() > 0 && args.PrevLogTerm != rf.getLogFromIndex(args.PrevLogIndex).Term {
-	//	reply.Success = false
-	//	reply.Term = rf.currentTerm
-	//	DebugPrintf(dInfo, rf.me, "日志Term不一致，收到的PrevLogTerm: %d,MyPrevLogTerm: %d", args.PrevLogTerm, rf.getLogFromIndex(args.PrevLogIndex).Term)
-	//	return
-	//}
+	// 如果日志在PrevLogIndex中不包含Term与PrevLogTerm匹配的Entry，则回复false
+	if prevLogTerm != rf.getLogFromIndex(args.PrevLogIndex).Term {
+		DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
+			rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm)
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
 	//
 	//for i, entry := range args.Entries {
 	//	// 第一个判断条件防止并发过程中有旧的数据被重新收到
@@ -316,18 +317,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//	}
 	//}
 
-	// 如果前日志不相等，直接拒绝
-	if rf.log[prevLogIndex].Term != prevLogTerm {
-		DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
-			rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm)
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		return
-	}
+	//// 如果前日志不相等，直接拒绝
+	//if rf.log[prevLogIndex].Term != prevLogTerm {
+	//	DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
+	//		rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm)
+	//	reply.Success = false
+	//	reply.Term = rf.currentTerm
+	//	return
+	//}
 
 	// 如果prev匹配成功
 	// 如果当前应更新
-	if rf.getLastLogIndex() > prevLogIndex && rf.log[prevLogIndex+1] != args.Entries[0] {
+	if rf.getLastLogIndex() > prevLogIndex && len(args.Entries) > 0 {
 		rf.log = rf.log[:prevLogIndex+1] // 将后面的内容都清空
 	}
 
@@ -444,7 +445,7 @@ func (rf *Raft) broadcastElection() {
 
 // 进行广播心跳信息，对每一个server发送AppendEntries
 func (rf *Raft) broadcastHeartbeat() {
-	DebugPrintf(dLeader, rf.me, "Leader%d start to send AppendEntries, log: %v", rf.me, rf.log)
+	DebugPrintf(dTrace, rf.me, "Leader%d start to send AppendEntries, log: %v", rf.me, rf.log)
 
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -465,7 +466,7 @@ func (rf *Raft) broadcastHeartbeat() {
 		if rf.getLastLogIndex() >= rf.nextIndex[i] {
 			entries = rf.getLogSlice(rf.nextIndex[i], rf.getLastLogIndex()+1)
 			DebugPrintf(dInfo, rf.me,
-				"For S%d, Append Entiries length: %d, nextIdx:%d", i, len(entries), rf.nextIndex[i])
+				"For S%d, Append Entiries: %v, nextIdx:%d", i, entries, rf.nextIndex[i])
 		}
 
 		if rf.getPrevLogIndex(i) >= 0 {
@@ -504,7 +505,7 @@ func (rf *Raft) broadcastHeartbeat() {
 func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 
-	DebugPrintf(dLeader, rf.me, "Send appendEntries to Follower %d, Use PrevLogIndex %d, PrevLogTerm %d.", i, args.PrevLogIndex, args.PrevLogTerm)
+	DebugPrintf(dLeader, rf.me, "Send appendEntries to Follower %d, Use PrevLogIndex %d, PrevLogTerm %d, entries: %v.", i, args.PrevLogIndex, args.PrevLogTerm, args.Entries)
 	//DebugPrintf(dInfo, rf.me,
 	//	"For S%d, getPrevLogIndex: %d, nextIdx:%d", i, args.PrevLogIndex, rf.nextIndex[i])
 	if !rf.sendAppendEntries(i, &args, &reply) {
@@ -533,15 +534,15 @@ func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 			DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
 			//DebugPrintf(dLeader, rf.me, "Leader log: %v", rf.log)
 			// 更新对应的nextIndex和matchIndex
-			rf.nextIndex[i] = rf.getLastLogIndex() + 1
-			rf.matchIndex[i] = rf.getLastLogIndex()
+			//rf.nextIndex[i] = rf.getLastLogIndex() + 1
+			//rf.matchIndex[i] = rf.getLastLogIndex()
 
 			//更新peer的nextIdx和matchIdx
-			//newNext := args.PrevLogIndex + len(args.Entries) + 1
-			//newMatch := args.PrevLogIndex + len(args.Entries)
+			newNext := args.PrevLogIndex + len(args.Entries) + 1
+			newMatch := args.PrevLogIndex + len(args.Entries)
 			//计算当前commitIdx，保证幂等性
-			//rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
-			//rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
+			rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
+			rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
 
 			rf.updateCommitIndex()
 			//DebugPrintf(dLog2, rf.me, "After recieve reply, matchIndex=%d, nextIndex=%d", rf.matchIndex, rf.nextIndex)
@@ -650,12 +651,12 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) commitMsg(applyCh chan raftapi.ApplyMsg) {
 	// 使用for循环来进行轮询查看
 	for rf.killed() == false {
-		//if rf.commitIndex-rf.lastApplied+1 > 0 {
-		//	// 防止出现新Leader导致旧Leader的lastApplied要暂时大于新commitIndex的情况
-		//	// 这种时候选择continue即可,因为新Leader会保持逐步增加commitIndex和LastApplied,这些值是保持同步的
-		//	continue
-		//	time.Sleep(10 * time.Millisecond)
-		//}
+		if rf.commitIndex-rf.lastApplied+1 < 0 {
+			// 防止出现新Leader导致旧Leader的lastApplied要暂时大于新commitIndex的情况
+			// 这种时候选择continue即可,因为新Leader会保持逐步增加commitIndex和LastApplied,这些值是保持同步的
+			continue
+			time.Sleep(10 * time.Millisecond)
+		}
 		msg := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.lastApplied+1)
 
 		rf.mu.Lock() // 锁住rf对象，不让commitIndex被修改
