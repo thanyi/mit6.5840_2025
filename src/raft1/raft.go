@@ -280,8 +280,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = RaftFollower
 	}
 
-	// 修改自身commitIndex为Leader发送过来的CommitIndex
-	rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 	DebugPrintf(dLog, rf.me, "Follower%d commitIndex update to %d", rf.me, rf.commitIndex)
 	// 开始进行日志修改
 	prevLogIndex := args.PrevLogIndex
@@ -298,7 +296,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DebugPrintf(dInfo, rf.me, "日志Index不一致，收到PrevLogIndex:%d,rf.LastLogIndex=%d", args.PrevLogIndex, rf.getLastLogIndex())
 		return
 	}
-	//
+
 	// 如果日志在PrevLogIndex中不包含Term与PrevLogTerm匹配的Entry，则回复false
 	if prevLogTerm != rf.getLogFromIndex(args.PrevLogIndex).Term {
 		DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
@@ -317,6 +315,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 更新log
 	rf.log = append(rf.log, args.Entries...)
 	DebugPrintf(dLog, rf.me, "Follower%d update the log : %d.", rf.me, len(rf.log))
+
+	// 修改自身commitIndex为Leader发送过来的CommitIndex
+	rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
