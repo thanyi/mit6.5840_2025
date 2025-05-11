@@ -9,6 +9,7 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"fmt"
 
 	//	"bytes"
 	"math/rand"
@@ -614,7 +615,9 @@ func (rf *Raft) getPrevLogTerm(i int) int {
 	if rf.getPrevLogIndex(i) < 0 {
 		panic("PrevLogIndex(i) < 0")
 	} else if rf.getPrevLogIndex(i) > len(rf.log) {
-		panic("PrevLogIndex(i) > len(rf.log)")
+		//panic("PrevLogIndex(i) > len(rf.log)")
+		err_msg := fmt.Sprintf("PrevLogIndex(i) > len(rf.log), PrevLogIndex(i) = %v, len(rf.log) = %v, nextidx: %v", rf.getPrevLogIndex(i), len(rf.log), rf.nextIndex)
+		panic(err_msg)
 	}
 	return rf.log[rf.getPrevLogIndex(i)].Term
 }
