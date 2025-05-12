@@ -330,12 +330,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 如果prev匹配成功
 	// 如果当前应更新
-	if rf.getLastLogIndex() > prevLogIndex && len(args.Entries) > 0 {
-		rf.log = rf.log[:prevLogIndex+1] // 将后面的内容都清空
+	//if rf.getLastLogIndex() > prevLogIndex && len(args.Entries) > 0 {
+	//	rf.log = rf.log[:prevLogIndex+1] // 将后面的内容都清空
+	//}
+
+	for i, entry := range args.Entries {
+		// 第一个判断条件: 判断最后一个log的index是否小于当前要写的log index，符合表示需要追加
+		// 第二个判断条件: 判断args.Entries中的第i日志与follower中的对应节点是否存在冲突，存在冲突则进行修复
+		if rf.getLastLogIndex() < args.PrevLogIndex+i+1 || rf.getLogFromIndex(args.PrevLogIndex+i+1).Term != entry.Term {
+			rf.log = append(rf.getLogSlice(0, args.PrevLogIndex+i+1), args.Entries[i:]...)
+			break
+		}
 	}
 
 	// 更新log
-	rf.log = append(rf.log, args.Entries...)
+	//rf.log = append(rf.log, args.Entries...)
 	DebugPrintf(dLog, rf.me, "Follower%d update the log : %d.", rf.me, len(rf.log))
 	rf.persist()
 	// 修改自身commitIndex为Leader发送过来的CommitIndex
@@ -343,7 +352,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	reply.FollowerLastApplied = rf.lastApplied
+	//reply.FollowerLastApplied = rf.lastApplied
 	rf.ResetElectionTime()
 
 }
