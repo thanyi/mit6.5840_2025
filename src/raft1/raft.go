@@ -112,8 +112,8 @@ func (rf *Raft) persist() {
 		return
 	}
 	err = e.Encode(rf.votedFor)
-	DebugPrintf(dError, rf.me, "Server%d can't persist votedFor%d.", rf.me, rf.votedFor)
 	if err != nil {
+		DebugPrintf(dError, rf.me, "Server%d can't persist votedFor%d.", rf.me, rf.votedFor)
 		return
 	}
 	err = e.Encode(rf.log)
@@ -229,7 +229,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if lastLogTerm >= args.LastLogTerm {
 		// 如果Follower的lastLogTerm大于Candidate
 		if args.LastLogTerm < lastLogTerm {
-			DebugPrintf(dVote, rf.me, "election restriction, Candidate's LastLogTerm too small.")
+			DebugPrintf(dVote, rf.me, "election restriction, Candidate%d's LastLogTerm too small.", args.CandidateId)
 			reply.VoteGranted = false
 			reply.Term = rf.currentTerm
 			return
@@ -347,8 +347,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//rf.log = append(rf.log, args.Entries...)
 	DebugPrintf(dLog, rf.me, "Follower%d update the log : %d.", rf.me, len(rf.log))
 	rf.persist()
+
+	//  如果leaderCommit > commitIndex，则commitIndex设置为min(leaderCommit,最新Entry的索引)
+	if args.LeaderCommit > rf.commitIndex {
+		DebugPrintf(dInfo, rf.me, "Receive Leader CommitIdx: %d", args.LeaderCommit)
+		// 不能超过Leader的Commit。如果Peer的Log比较滞后，args.PrevLogIndex+len(args.Entries)能快速更新commitIdx
+		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		DebugPrintf(dCommit, rf.me, "Update CommitIdx to %d, now LastApplied is %d, log length is %d", rf.commitIndex, rf.lastApplied, len(rf.log))
+	}
+
 	// 修改自身commitIndex为Leader发送过来的CommitIndex
-	rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
+	//rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
@@ -523,16 +532,21 @@ func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 
 	if reply.Term > rf.currentTerm {
 		// 接收的任期大于自身任期，降级为Follower
+		DebugPrintf(dError, rf.me, "Leader%d receives higher term in AppendEntries reply, down to Follower, Term update to %d.", rf.me, rf.currentTerm)
 		rf.state = RaftFollower
 		rf.votedFor = -1
 		rf.currentTerm = reply.Term
 		rf.persist() // 持久化存储
 		rf.ResetElectionTime()
-		DebugPrintf(dError, rf.me, "Leader%d receives higher term in AppendEntries reply, down to Follower, Term update to %d.", rf.me, rf.currentTerm)
 		return
 	}
 
-	if reply.Term == rf.currentTerm && rf.state == RaftLeader {
+	if rf.state != RaftLeader {
+		DebugPrintf(dWarn, rf.me, "Not Leader，Reject to react S%d:%d", i, reply.Term)
+		return
+	}
+
+	if reply.Term == rf.currentTerm {
 		if reply.Success {
 			DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
 			//DebugPrintf(dLeader, rf.me, "Leader log: %v", rf.log)
@@ -669,7 +683,7 @@ func (rf *Raft) commitMsg(applyCh chan raftapi.ApplyMsg) {
 		msg := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.lastApplied) // 这里申请的大小和上面if判断保持一致
 
 		rf.mu.Lock() // 锁住rf对象，不让commitIndex被修改
-		DebugPrintf(dLog, rf.me, "Leader%d start to commit", rf.me)
+		DebugPrintf(dLog, rf.me, "Server%d start to commit", rf.me)
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			msg = append(msg, raftapi.ApplyMsg{
