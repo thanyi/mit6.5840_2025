@@ -10,6 +10,7 @@ import (
 	"6.5840/labgob"
 	"bytes"
 	"fmt"
+	"math"
 
 	//	"bytes"
 	"math/rand"
@@ -269,8 +270,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // 当前任期
 	Success bool // 如果Follower们存有对应的prevLogIndex和prevLogTerm
-	// extend
-	FollowerLastApplied int // Follower的LastApplied为了快速重传
+
+	//Extend
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 // 在Lab3A中，只针对心跳信息进行发送
@@ -284,11 +288,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DebugPrintf(dError, rf.me, "Term of Leader%d smaller than Follower%d，reject AppendEntries.", args.LeaderId, rf.me)
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		// Extend
+		reply.XTerm = -1  // 不存在
+		reply.XIndex = -1 // 不存在
+		reply.XLen = len(rf.log)
 		return
 	}
 	// 领导者任期大于当前任期
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
 		// 如果状态不是follower，降为follower
 		if rf.state != RaftFollower {
 			DebugPrintf(dError, rf.me, "Receive higher Term%d, down to Follower", rf.currentTerm)
@@ -305,26 +315,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 开始进行日志修改
 	prevLogIndex := args.PrevLogIndex
 	prevLogTerm := args.PrevLogTerm
-	if prevLogIndex < 0 {
-		DebugPrintf(dError, rf.me, "Candidate%d receive prevLogIndex < 0", rf.me)
-		return
-	}
 
 	// 检查Leader的日志长度是否与追随者相同
-	if args.PrevLogIndex > rf.getLastLogIndex() {
+	if args.PrevLogIndex > 0 && args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		reply.XTerm = -1  // 不存在
+		reply.XIndex = -1 // 不存在
+		reply.XLen = len(rf.log)
 		DebugPrintf(dInfo, rf.me, "PrevLogIndex > len(log): Receive PrevLogIndex:%d, rf.LastLogIndex=%d", args.PrevLogIndex, rf.getLastLogIndex())
 		return
 	}
 
 	// 如果日志在PrevLogIndex中不包含Term与PrevLogTerm匹配的Entry，则回复false
-	if prevLogTerm != rf.getLogFromIndex(args.PrevLogIndex).Term {
+	if args.PrevLogIndex > 0 && prevLogTerm != rf.getLogFromIndex(args.PrevLogIndex).Term {
 		DebugPrintf(dError, rf.me, "Follower%d's prevLogIndex don't match. PrevLogIndex is %d, Term is %d. But args.PrevLogTerm is %d.",
 			rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm)
-		reply.FollowerLastApplied = rf.lastApplied
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		reply.XTerm = rf.getLogFromIndex(args.PrevLogIndex).Term
+		reply.XLen = len(rf.log)
+		reply.XIndex, _ = rf.TermRange(reply.XTerm)
 		return
 	}
 
@@ -374,23 +387,23 @@ func (rf *Raft) StartElection() {
 	rf.persist() // 持久化存储
 	DebugPrintf(dVote, rf.me,
 		"Candidate%d start election, term：%d", rf.me, rf.currentTerm)
-	go rf.broadcastElection()
-
-	rf.ResetElectionTime()
-}
-
-// 从Candidate端进行广播请求，请求投票
-func (rf *Raft) broadcastElection() {
 
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: rf.getLastLogIndex(),
-		LastLogTerm:  rf.log[rf.getLastLogIndex()].Term,
+		LastLogTerm:  rf.getLastLogTerm(),
 	}
-	voteCnt := 1
-	var once sync.Once
 
+	go rf.broadcastElection(args)
+
+	rf.ResetElectionTime()
+}
+
+// 从Candidate端进行广播请求，请求投票
+func (rf *Raft) broadcastElection(args RequestVoteArgs) {
+	voteCnt := 1
+	//var one sync.Once  不能使用这个one变量进行单独的操作！！！！会触发很奇怪的Bug！！！
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -406,12 +419,6 @@ func (rf *Raft) broadcastElection() {
 				return
 			}
 
-			if !reply.VoteGranted {
-				// 如果VoteGranted为false，表示已经投票，不做处理
-				DebugPrintf(dError, rf.me, "Candidate%d's request reply from Follower %d is not VoteGranted", rf.me, i)
-				return
-			}
-
 			if reply.Term > rf.currentTerm {
 				// 如果返回的Term大于自身，状态变为Follower
 				DebugPrintf(dError, rf.me, "Candidate%d's reply.Term from Follower %d is bigger", rf.me, i)
@@ -424,32 +431,48 @@ func (rf *Raft) broadcastElection() {
 				return
 			}
 
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			// 成功的情况，需要加锁，保证对voteCnt操作不会冲突
-			voteCnt += 1
-			if voteCnt > len(rf.peers)>>1 {
-				// todo 查看有无优化，函数封装
-				once.Do(func() {
-					rf.state = RaftLeader
-					DebugPrintf(dLeader, rf.me, "server%d up to Leader", rf.me)
-					DebugPrintf(dTerm, rf.me, "the Term：%d", rf.currentTerm)
+			if reply.VoteGranted {
+				rf.mu.Lock()
+				if rf.state == RaftCandidate {
+					// 成功的情况，需要加锁，保证对voteCnt操作不会冲突
+					voteCnt += 1
+					if voteCnt > len(rf.peers)>>1 {
+						// todo 查看有无优化，函数封装
 
-					// 初始化，初始化NextIndex数组和matchIndex数组
-					for i, _ := range rf.peers {
-						rf.nextIndex[i] = rf.getLastLogIndex() + 1
-						rf.matchIndex[i] = 0
+						rf.state = RaftLeader
+						DebugPrintf(dLeader, rf.me, "server%d up to Leader", rf.me)
+						DebugPrintf(dTerm, rf.me, "the Term：%d", rf.currentTerm)
+
+						// 初始化，初始化NextIndex数组和matchIndex数组
+						for i, _ := range rf.peers {
+							if i != rf.me {
+								rf.nextIndex[i] = rf.getLastLogIndex() + 1
+								rf.matchIndex[i] = 0
+							} else {
+								// Leader 自己的 matchIndex 是最新的
+								rf.matchIndex[i] = rf.getLastLogIndex()
+								// Leader 自己的 nextIndex 是最后一个索引 + 1
+								rf.nextIndex[i] = rf.getLastLogIndex() + 1
+							}
+						}
+						// 开始广播发送AppendEntries
+						go rf.broadcastHeartbeat()
+						rf.ResetHeartbeat()
+
 					}
-					// 开始广播发送AppendEntries
-					go rf.broadcastHeartbeat()
-					rf.ResetHeartbeat()
-				})
-				//once.Do(rf.changeToLeader)
+				}
+				rf.mu.Unlock()
 			}
 		}(i, args)
 
 		// 如果状态变为Follower，表示投票失败，直接退出循环
 		if rf.state == RaftFollower {
+			DebugPrintf(dError, rf.me, "server%d down to Follower，end election.", rf.me)
+			break
+		}
+
+		// 如果状态变为Leader，表示已经成功，直接退出循环
+		if rf.state == RaftLeader {
 			DebugPrintf(dError, rf.me, "server%d down to Follower，end election.", rf.me)
 			break
 		}
@@ -546,54 +569,102 @@ func (rf *Raft) heartbeat(i int, args AppendEntriesArgs) {
 		return
 	}
 
-	if reply.Term == rf.currentTerm {
-		if reply.Success {
-			DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
-			//DebugPrintf(dLeader, rf.me, "Leader log: %v", rf.log)
-			// 更新对应的nextIndex和matchIndex
-			//rf.nextIndex[i] = rf.getLastLogIndex() + 1
-			//rf.matchIndex[i] = rf.getLastLogIndex()
+	if reply.Success {
+		DebugPrintf(dLeader, rf.me, "S%d AppendEntry success.", i)
+		//DebugPrintf(dLeader, rf.me, "Leader log: %v", rf.log)
+		// 更新对应的nextIndex和matchIndex
+		//rf.nextIndex[i] = rf.getLastLogIndex() + 1
+		//rf.matchIndex[i] = rf.getLastLogIndex()
 
-			//更新peer的nextIdx和matchIdx
-			newNext := args.PrevLogIndex + len(args.Entries) + 1
-			newMatch := args.PrevLogIndex + len(args.Entries)
-			////计算当前commitIdx，保证幂等性
-			rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
-			rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
+		//更新peer的nextIdx和matchIdx
+		newNext := args.PrevLogIndex + len(args.Entries) + 1
+		newMatch := args.PrevLogIndex + len(args.Entries)
+		////计算当前commitIdx，保证幂等性
+		rf.nextIndex[i] = max(newNext, rf.nextIndex[i])
+		rf.matchIndex[i] = max(newMatch, rf.matchIndex[i])
 
-			rf.updateCommitIndex()
-			//DebugPrintf(dLog2, rf.me, "After recieve reply, matchIndex=%d, nextIndex=%d", rf.matchIndex, rf.nextIndex)
+		rf.updateCommitIndex()
+		//DebugPrintf(dLog2, rf.me, "After recieve reply, matchIndex=%d, nextIndex=%d", rf.matchIndex, rf.nextIndex)
 
+	} else {
+		// 重试机制，当心跳信息返回fail时
+		DebugPrintf(dError, rf.me, "S%d AppendEntry failed. NextIndex down to %d; prevIndex = %d", i, rf.nextIndex[i], rf.getPrevLogIndex(i))
+
+		//if reply.FollowerLastApplied != 0 {
+		//	rf.nextIndex[i] = reply.FollowerLastApplied + 1
+		//} else if rf.nextIndex[i] > 1 {
+		//	rf.nextIndex[i] -= 1
+		//}
+		if reply.XTerm == -1 {
+			rf.nextIndex[i] = reply.XLen
+			DebugPrintf(dLog, rf.me, "S%d XTerm == -1,nextIdx -> reply.XLen + 1", i)
 		} else {
-			// 重试机制，当心跳信息返回fail时
-			DebugPrintf(dError, rf.me, "S%d AppendEntry failed. NextIndex down to %d; prevIndex = %d", i, rf.nextIndex[i], rf.getPrevLogIndex(i))
-
-			if reply.FollowerLastApplied != 0 {
-				rf.nextIndex[i] = reply.FollowerLastApplied + 1
-			} else if rf.nextIndex[i] > 1 {
-				rf.nextIndex[i] -= 1
+			_, maxIdx := rf.TermRange(reply.XTerm)
+			if maxIdx == -1 {
+				rf.nextIndex[i] = reply.XIndex
+				DebugPrintf(dLog, rf.me, "Leader no XTerm%d ,S%d nextIdx -> %d", reply.XTerm, i, reply.XIndex)
+			} else {
+				rf.nextIndex[i] = maxIdx + 1
+				DebugPrintf(dLog, rf.me, "Leader has XTerm%d ,S%d nextIdx -> %d", reply.XTerm, i, maxIdx)
 			}
-
-			DebugPrintf(dLog2, rf.me, "Down S%d nextId, nextId:%d", i, rf.nextIndex[i])
-			newArg := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: rf.getPrevLogIndex(i),
-				PrevLogTerm:  rf.getPrevLogTerm(i),
-				Entries:      rf.getLogSlice(rf.nextIndex[i], rf.getLastLogIndex()+1),
-				LeaderCommit: rf.commitIndex,
-			}
-
-			go rf.heartbeat(i, newArg)
-			return
 		}
+
+		// 检查计算出的 nextIndex 是否有效且在 Leader 日志范围内
+		if rf.nextIndex[i] < 0 { // 防御性检查
+			rf.nextIndex[i] = 0 // 或 1，取决于你的 dummy entry 策略
+			DebugPrintf(dError, rf.me, "S%d calculated nextIndex %d < 0. Resetting to %d.", i, rf.nextIndex[i], rf.nextIndex[i])
+		}
+		if rf.nextIndex[i] > len(rf.log) { // 修正条件
+			// 如果计算出的 nextIndex 超出了 Leader 自己的日志范围，将其限制为 Leader 日志的末尾
+			// Leader 只能发送自己拥有的日志条目
+			rf.nextIndex[i] = len(rf.log) // 修正：限制为 len(rf.log)
+			DebugPrintf(dError, rf.me, "S%d calculated nextIndex %d > Leader log length %d. Resetting to %d.", i, rf.nextIndex[i], len(rf.log), len(rf.log))
+			// 不需要 return，继续构建 RPC 发送心跳或空条目
+		}
+
+		nextIdx := rf.nextIndex[i]
+		prevLogIndex := nextIdx - 1
+		prevLogTerm := rf.getLogFromIndex(prevLogIndex).Term
+
+		entries := rf.getLogSlice(nextIdx, rf.getLastLogIndex()+1)
+		DebugPrintf(dLog2, rf.me, "Down S%d nextId, nextId:%d", i, rf.nextIndex[i])
+		newArg := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: rf.commitIndex,
+		}
+
+		go rf.heartbeat(i, newArg)
+		return
 	}
 
 }
 
+func (rf *Raft) TermRange(term int) (minIdx, maxIdx int) {
+	minIdx, maxIdx = math.MaxInt, -1
+	for i := 0; i < len(rf.log); i++ {
+		if rf.log[i].Term == term {
+			minIdx = min(minIdx, i)
+			maxIdx = max(maxIdx, i)
+		}
+	}
+	if maxIdx == -1 {
+		minIdx = -1
+	}
+	// 大小值均+1，表示索引（索引从0开始）
+	return minIdx, maxIdx
+}
+
 func (rf *Raft) getLogFromIndex(i int) LogEntry {
-	if i > rf.getLastLogIndex() {
+	if i < 0 {
 		return LogEntry{Term: 0, Command: nil}
+	}
+
+	if i >= len(rf.log) {
+		return LogEntry{Term: -1, Command: nil}
 	}
 	return rf.log[i]
 }
@@ -647,8 +718,6 @@ func (rf *Raft) getPrevLogTerm(i int) int {
 
 func (rf *Raft) updateCommitIndex() {
 	// 假定其是在加锁函数中被调用
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 	DebugPrintf(dCommit, rf.me, "updateCommitIndex: start to update commitIndex. matchidx : %v", rf.matchIndex)
 	for N := rf.getLastLogIndex(); N > rf.commitIndex && rf.getLogFromIndex(N).Term == rf.currentTerm; N-- {
 
@@ -699,7 +768,7 @@ func (rf *Raft) commitMsg(applyCh chan raftapi.ApplyMsg) {
 			DebugPrintf(dCommit, rf.me, "commit {Index:%d , Cmd: %v} to ApplyCh", v.CommandIndex, v.Command)
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 }
