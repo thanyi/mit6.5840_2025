@@ -68,6 +68,12 @@ type Raft struct {
 	lastApplied int        // 已经应用到状态机的最高日志条目索引
 	nextIndex   []int      // 对每个服务器，要发送的下一跳日志条目的索引
 	matchIndex  []int      // 对每个服务器，已知被复制的最高日志条目的索引
+
+	// snapshot
+	lastIncludedIndex int                   // 快照中最新的Index
+	lastIncludedTerm  int                   // 快照中最新的Index中的Term
+	snapshot          []byte                // 保存的snapshot
+	applyCh           chan raftapi.ApplyMsg // 注意chan关键字，声明此时
 }
 
 // 帮助更新下一次心跳时间点
@@ -122,8 +128,27 @@ func (rf *Raft) persist() {
 		DebugPrintf(dError, rf.me, "Server%d can't persist log.", rf.me)
 		return
 	}
+
+	err = e.Encode(rf.lastIncludedIndex)
+	if err != nil {
+		DebugPrintf(dError, rf.me, "Server%d can't persist lastIncludedIndex.", rf.me)
+		return
+	}
+
+	err = e.Encode(rf.lastIncludedTerm)
+	if err != nil {
+		DebugPrintf(dError, rf.me, "Server%d can't persist lastIncludedTerm.", rf.me)
+		return
+	}
+
 	raftState := w.Bytes()
-	rf.persister.Save(raftState, nil)
+	// 根据snapshot是否存在来进行Save
+	if rf.snapshot != nil {
+		rf.persister.Save(raftState, rf.snapshot)
+	} else {
+		rf.persister.Save(raftState, nil)
+	}
+
 	DebugPrintf(dPersist, rf.me, "Success for persist.")
 }
 
@@ -137,16 +162,24 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var (
-		currentTerm int
-		votedFor    int
-		log         []LogEntry
+		currentTerm       int
+		votedFor          int
+		log               []LogEntry
+		lastIncludedIndex int
+		lastIncludedTerm  int
 	)
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 		DebugPrintf(dError, rf.me, "Server%d can't readPersist.", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -163,7 +196,23 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	// snapshot由上次服务器来进行发送
+	// snapshot 中已经存储了所有需要保存的快照，在这个函数中只需要把它保存进变量中即可
+	// 1. 切除log中被快照的部分 2.保存snapshot
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	DebugPrintf(dSnap, rf.me, "Server%d start save snapshot and cut log.", rf.me)
+
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.getLogFromIndex(index).Term
+
+	rf.snapshot = snapshot
+
+	rf.log = rf.getLogSlice(rf.lastIncludedIndex+1, len(rf.log)) // 左闭右开
+
+	DebugPrintf(dSnap, rf.me, "Server%d end saving snapshot and cut log.", rf.me)
 }
 
 // example RequestVote RPC arguments structure.
