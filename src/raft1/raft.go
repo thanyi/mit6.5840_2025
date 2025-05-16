@@ -708,6 +708,7 @@ func (rf *Raft) TermRange(term int) (minIdx, maxIdx int) {
 }
 
 func (rf *Raft) getLogFromIndex(i int) LogEntry {
+	i = i - (rf.lastIncludedIndex + 1)
 	if i < 0 {
 		return LogEntry{Term: 0, Command: nil}
 	}
@@ -720,6 +721,9 @@ func (rf *Raft) getLogFromIndex(i int) LogEntry {
 
 // 返回区间，左闭右开
 func (rf *Raft) getLogSlice(left int, right int) []LogEntry {
+	left = left - (rf.lastIncludedIndex + 1)
+	right = right - (rf.lastIncludedIndex + 1)
+
 	if left > right {
 		panic("left > right")
 	}
